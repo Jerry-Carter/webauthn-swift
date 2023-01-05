@@ -22,3 +22,13 @@ public struct Credential {
     /// The public key for this certificate
     public let publicKey: P256.Signing.PublicKey
 }
+
+// MARK: Additions begin here
+public struct CredentialData {
+    /// base64 encoded String of the credential ID bytes
+    public let credentialID: Data
+
+    /// The public key for this certificate
+    public let publicKey: P256.Signing.PublicKey
+}
+// MARK: Additions end here

@@ -235,6 +235,94 @@ public struct WebAuthnManager {
         }
         return credentialsData
     }
+    
+    // MARK: Additions start here
+    public func validateAuthenticatorAttestationResponse(_ rawAttestation: Data, clientDataJSON:Data, challengeProvided: Data, origin: String, logger: Logger) throws -> CredentialData {
+        
+        // Validate the WebAuthn clientDataJSON
+        let clientObject = try JSONDecoder().decode(ClientDataObject.self, from: clientDataJSON)
+        guard let clientObjectChallenge = clientObject.challenge.base64URLDecodedData else {
+            throw WebAuthnError.validationError
+        }
+        guard challengeProvided == clientObjectChallenge else {
+            throw WebAuthnError.validationError
+        }
+        guard clientObject.type == "webauthn.create" else {
+            throw WebAuthnError.badRequestData
+        }
+        guard origin == clientObject.origin else {
+            throw WebAuthnError.validationError
+        }
+
+        // Parse the WebAuthn attestationObject
+        guard let decodedAttestationObject = try CBOR.decode([UInt8](rawAttestation)) else {
+            throw WebAuthnError.badRequestData
+        }
+
+        // Ignore format/statement for now
+        guard let authData = decodedAttestationObject["authData"], case let .byteString(authDataBytes) = authData else {
+            throw WebAuthnError.badRequestData
+        }
+        guard let credentialsData = try parseAttestationObject(authDataBytes, logger: logger) else {
+            throw WebAuthnError.badRequestData
+        }
+        guard let publicKeyObject = try CBOR.decode(credentialsData.publicKey) else {
+            throw WebAuthnError.badRequestData
+        }
+        // This is now in COSE format
+        // https://www.iana.org/assignments/cose/cose.xhtml#algorithms
+        guard let keyTypeRaw = publicKeyObject[.unsignedInt(1)], case let .unsignedInt(keyType) = keyTypeRaw else {
+            throw WebAuthnError.badRequestData
+        }
+        guard let algorithmRaw = publicKeyObject[.unsignedInt(3)], case let .negativeInt(algorithmNegative) = algorithmRaw else {
+            throw WebAuthnError.badRequestData
+        }
+        // https://github.com/unrelentingtech/SwiftCBOR#swiftcbor
+        // Negative integers are decoded as NegativeInt(UInt), where the actual number is -1 - i
+        let algorithm: Int = -1 - Int(algorithmNegative)
+
+        // Curve is key -1 - or -0 for SwiftCBOR
+        // X Coordinate is key -2, or NegativeInt 1 for SwiftCBOR
+        // Y Coordinate is key -3, or NegativeInt 2 for SwiftCBOR
+
+        guard let curveRaw = publicKeyObject[.negativeInt(0)], case let .unsignedInt(curve) = curveRaw else {
+            throw WebAuthnError.badRequestData
+        }
+        guard let xCoordRaw = publicKeyObject[.negativeInt(1)], case let .byteString(xCoordinateBytes) = xCoordRaw else {
+            throw WebAuthnError.badRequestData
+        }
+        guard let yCoordRaw = publicKeyObject[.negativeInt(2)], case let .byteString(yCoordinateBytes) = yCoordRaw else {
+            throw WebAuthnError.badRequestData
+        }
+
+        logger.debug("Key type was \(keyType)")
+        logger.debug("Algorithm was \(algorithm)")
+        logger.debug("Curve was \(curve)")
+        
+        let key = try P256.Signing.PublicKey(rawRepresentation: xCoordinateBytes + yCoordinateBytes)
+        logger.debug("Key is \(key.pemRepresentation)")
+        
+        return CredentialData(credentialID: Data(credentialsData.credentialID), publicKey: key)
+    }
+
+    public func validateAuthenticatorAssertionResponse(_ authenticatorData: Data, clientDataJSON:Data, signatureClaimed:Data, challengeProvided: Data, publicKey: P256.Signing.PublicKey, logger: Logger) throws {
+        
+        // Validate the challenge from the WebAuthn clientDataJSON.  The type and origin are not checked.
+        let clientObject = try JSONDecoder().decode(ClientDataObject.self, from: clientDataJSON)
+        guard let clientObjectChallenge = clientObject.challenge.base64URLDecodedData else {
+            throw WebAuthnError.validationError
+        }
+        guard challengeProvided == clientObjectChallenge else {
+            throw WebAuthnError.validationError
+        }
+        let clientDataJSONHash = SHA256.hash(data: clientDataJSON)
+
+        let signature = try P256.Signing.ECDSASignature(derRepresentation: signatureClaimed)
+        guard publicKey.isValidSignature(signature, for: authenticatorData + clientDataJSONHash) else {
+            throw WebAuthnError.validationError
+        }
+    }
+    // MARK: Additions end here
 }
 
 extension WebAuthnManager {
